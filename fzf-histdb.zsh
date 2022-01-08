@@ -3,6 +3,9 @@ HISTDB_FZF_COMMAND=${HISTDB_FZF_COMMAND:-fzf}
 HISTDB_FZF_MODES=('session' 'local' 'global' 'everywhere')
 HISTDB_FZF_DEFAULT_MODE=${HISTDB_FZF_DEFAULT_MODE:-session}
 
+# Set to "nohidden" to start with preview enabled.
+HISTDB_FZF_PREVIEW=${HISTDB_FZF_PREVIEW:-hidden}
+
 if [[ ! -v HISTDB_FZF_MODE_KEYS ]]; then
     declare -A HISTDB_FZF_MODE_KEYS
     HISTDB_FZF_MODE_KEYS=(
@@ -31,7 +34,7 @@ histdb-fzf-log() {
     fi
 }
 
-histdb-fzf-query(){
+histdb-fzf-query() {
     # A wrapper for histdb-query with fzf specific options and query.
     _histdb_init
 
@@ -243,7 +246,7 @@ histdb-fzf-widget() {
             --bind 'ctrl-/:toggle-preview'
             --print-query
             --preview='source ${HISTDB_FZF_SOURCE}; histdb-detail ${HISTDB_FILE} {1}'
-            --preview-window=right:50%:hidden,wrap
+            --preview-window=right:50%:${HISTDB_FZF_PREVIEW},wrap
             --no-hscroll
             --query='${query}' +m"
 
