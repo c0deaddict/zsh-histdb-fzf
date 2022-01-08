@@ -1,299 +1,284 @@
-FZF_HISTDB_FILE="${(%):-%N}"
-HISTDB_FZF_CMD=${HISTDB_FZF_COMMAND:-fzf}
+HISTDB_FZF_SOURCE="${(%):-%N}"
+HISTDB_FZF_COMMAND=${HISTDB_FZF_COMMAND:-fzf}
+HISTDB_FZF_MODES=('session' 'local' 'global' 'everywhere')
+HISTDB_FZF_DEFAULT_MODE=${HISTDB_FZF_DEFAULT_MODE:-session}
 
-# use gdate if available (will provide nanoseconds on mac)
-if command -v gdate >> /dev/null; then
-  datecmd='gdate'
-else
-  datecmd='date'
+if [[ ! -v HISTDB_FZF_MODE_KEYS ]]; then
+    declare -A HISTDB_FZF_MODE_KEYS
+    HISTDB_FZF_MODE_KEYS=(
+        [session]="f1"
+        [local]="f2"
+        [global]="f3"
+        [everywhere]="f4"
+    )
 fi
-
-get_date_format() (
-    local date_format
-
-    date_format="$(awk '{ print tolower($1) }' <<< "${FZF_HISTDB_FORCE_DATE_FORMAT}")"
-
-    if [[ "${date_format}" != "us" && "${date_format}" != "non-us" ]]; then
-        eval "$(locale)"
-        local lc_time_lang="$(awk -F'.' '{ print tolower($1) }' <<< "${LC_TIME}")"
-        if [[ "${lc_time_lang}" == "en_us" || "${lc_time_lang}" == "c" ]]; then
-            date_format="us"
-        else
-            date_format="non-us"
-        fi
-    fi
-
-    if [[ "${date_format}" == "us" ]]; then
-        echo "%m/%d"
-    else
-        echo "%d/%m"
-    fi
-)
 
 # variables for substitution in log
 NL="
 "
 NLT=$(printf "\n\t\t")
+# use Figure Space U+2007 as separator
+SEP=" "
 
 autoload -U colors && colors
 
 histdb-fzf-log() {
-  if [[ ! -z ${HISTDB_FZF_LOGFILE} ]]; then
-    if [[ ! -f ${HISTDB_FZF_LOGFILE} ]]; then
-      touch ${HISTDB_FZF_LOGFILE}
+    if [[ ! -z ${HISTDB_FZF_LOGFILE} ]]; then
+        if [[ ! -f ${HISTDB_FZF_LOGFILE} ]]; then
+            touch ${HISTDB_FZF_LOGFILE}
+        fi
+        printf "%s %s\n" $(date +'%s.%N') ${*//$NL/$NLT} >> ${HISTDB_FZF_LOGFILE}
     fi
-    printf "%s %s\n" $(${datecmd} +'%s.%N') ${*//$NL/$NLT} >> ${HISTDB_FZF_LOGFILE}
-  fi
 }
-
 
 histdb-fzf-query(){
-  # A wrapper for histb-query with fzf specific options and query
-  _histdb_init
-  local -a opts
+    # A wrapper for histdb-query with fzf specific options and query.
+    _histdb_init
 
-  zparseopts -E -D -a opts \
-             s d t
+    local where=""
+    local everywhere=0
+    case "$1" in
+        'session')
+            where="${where:+$where and} session in (${HISTDB_SESSION})"
+            ;;
+        'local')
+            where="${where:+$where and} (places.dir like '$(sql_escape $PWD)%')"
+            ;;
+        'everywhere')
+            where="${where:+$where and} places.host=${HISTDB_HOST}"
+            ;;
+    esac
 
-  local where=""
-  local everywhere=0
-  for opt ($opts); do
-      case $opt in
-          -s)
-              where="${where:+$where and} session in (${HISTDB_SESSION})"
-              ;;
-          -d)
-              where="${where:+$where and} (places.dir like '$(sql_escape $PWD)%')"
-              ;;
-          -t)
-              everywhere=1
-              ;;
-      esac
-  done
-  if [[ $everywhere -eq 0 ]];then
-    where="${where:+$where and} places.host=${HISTDB_HOST}"
-  fi
+    local query="
+        select
+          id,
+          CASE exit_status WHEN 0 THEN '' ELSE '${fg[red]}' END || replace(argv, '$NL', ' ') as cmd,
+          CASE exit_status WHEN 0 THEN '' ELSE '${reset_color}' END
+        from
+        (select
+          max(history.id) as id, commands.argv as argv, max(start_time) as max_start, exit_status
+        from
+          history
+          left join commands on history.command_id = commands.id
+          left join places on history.place_id = places.id
+        ${where:+where ${where}}
+        group by history.command_id
+        order by max_start desc)
+        order by max_start desc
+    "
 
-  local cols="history.id as id, commands.argv as argv, max(start_time) as max_start, exit_status"
+    histdb-fzf-log "query for log '${(Q)query}'"
 
-  local date_format="$(get_date_format)"
-  local mst="datetime(max_start, 'unixepoch')"
-  local dst="datetime('now', 'start of day')"
-  local yst="datetime('now', 'start of year')"
-  local timecol="strftime(
-                   case when $mst > $dst then
-                      '%H:%M'
-                   else (
-                     case when $mst > $yst then
-                       '${date_format}'
-                     else
-                       '${date_format}/%Y'
-                     end)
-                   end,
-                   max_start,
-                   'unixepoch',
-                   'localtime') as time"
-
-  local query="
-      select
-      id,
-      ${timecol},
-      CASE exit_status WHEN 0 THEN '' ELSE '${fg[red]}' END || replace(argv, '$NL', ' ') as cmd,
-      CASE exit_status WHEN 0 THEN '' ELSE '${reset_color}' END
-      from
-      (select
-        ${cols}
-      from
-        history
-        left join commands on history.command_id = commands.id
-        left join places on history.place_id = places.id
-      ${where:+where ${where}}
-      group by history.command_id, history.place_id
-      order by max_start desc)
-      order by max_start desc"
-
-  histdb-fzf-log "query for log '${(Q)query}'"
-
-  # use Figure Space U+2007 as separator
-  _histdb_query -separator ' ' "$query"
-  histdb-fzf-log "query completed"
+    _histdb_query -separator "$SEP" "$query"
+    histdb-fzf-log "query completed"
 }
 
-histdb-detail(){
-  HISTDB_FILE=$1
-  local where="(history.id == '$(sed -e "s/'/''/g" <<< "$2" | tr -d '\000')')"
+histdb-detail() {
+    HISTDB_FILE=$1
+    local where="(history.id == '$(sed -e "s/'/''/g" <<< "$2" | tr -d '\000')')"
 
-  local date_format="$(get_date_format)"
+    local query="
+        select
+          strftime('%Y-%m-%d %H:%M:%S', max_start, 'unixepoch', 'localtime') as time,
+          ifnull(exit_status, 'null') as exit_status,
+          ifnull(secs, '?') as secs,
+          ifnull(host, 'null') as host,
+          ifnull(dir, 'null') as dir,
+          session,
+          id,
+          argv as cmd
+        from
+          (select
+            history.id as id,
+            commands.argv as argv,
+            max(start_time) as max_start,
+            exit_status,
+            duration as secs,
+            count() as run_count,
+            history.session as session,
+            places.host as host,
+            places.dir as dir
+          from
+            history
+            left join commands on history.command_id = commands.id
+            left join places on history.place_id = places.id
+          where ${where})
+    "
 
-  local cols="
-    history.id as id,
-    commands.argv as argv,
-    max(start_time) as max_start,
-    exit_status,
-    duration as secs,
-    count() as runcount,
-    history.session as session,
-    places.host as host,
-    places.dir as dir"
+    array_str=("${$(sqlite3 -cmd ".timeout 1000" "${HISTDB_FILE}" -separator " " "$query" )}")
+    array=(${(@s: :)array_str})
 
-  local query="
-    select
-      strftime('${date_format}/%Y %H:%M', max_start, 'unixepoch', 'localtime') as time,
-      ifnull(exit_status, 'NONE') as exit_status,
-      ifnull(secs, '-----') as secs,
-      ifnull(host, '<somewhere>') as host,
-      ifnull(dir, '<somedir>') as dir,
-      session,
-      id,
-      argv as cmd
-    from
-      (select ${cols}
-      from
-        history
-        left join commands on history.command_id = commands.id
-        left join places on history.place_id = places.id
-      where ${where})
-  "
+    histdb-fzf-log "DETAIL: ${array_str}"
 
-  array_str=("${$(sqlite3 -cmd ".timeout 1000" "${HISTDB_FILE}" -separator " " "$query" )}")
-  array=(${(@s: :)array_str})
+    # Add some color
+    if [[ "${array[2]}" == "null" ]];then
+        # Color exitcode magento if not available.
+        array[2]=$(echo "\033[35m${array[2]}\033[0m")
+    elif [[ ! ${array[2]} ]];then
+        # Color exitcode red if not 0.
+        array[2]=$(echo "\033[31m${array[2]}\033[0m")
+    fi
+    if [[ "${array[3]}" == "?" ]];then
+        # Color duration magento if not available.
+        array[3]=$(echo "\033[35m${array[3]}\033[0m")
+    elif [[ "${array[3]}" -gt 300 ]];then
+        # Duration red if > 5 min.
+        array[3]=$(echo "\033[31m${array[3]}\033[0m")
+    elif [[ "${array[3]}" -gt 60 ]];then
+        # Duration yellow if > 1 min
+        array[3]=$(echo "\033[33m${array[3]}\033[0m")
+    fi
 
-  histdb-fzf-log "DETAIL: ${array_str}"
-
-  # Add some color
-  if [[ "${array[2]}" == "NONE" ]];then
-    #Color exitcode magento if not available
-    array[2]=$(echo "\033[35m${array[2]}\033[0m")
-  elif [[ ! ${array[2]} ]];then
-    #Color exitcode red if not 0
-    array[2]=$(echo "\033[31m${array[2]}\033[0m")
-  fi
-  if [[ "${array[3]}" == "-----" ]];then
-    #Color duration magento if not available
-    array[3]=$(echo "\033[35m${array[3]}\033[0m")
-  elif [[ "${array[3]}" -gt 300 ]];then
-    # Duration red if > 5 min
-    array[3]=$(echo "\033[31m${array[3]}\033[0m")
-  elif [[ "${array[3]}" -gt 60 ]];then
-    # Duration yellow if > 1 min
-    array[3]=$(echo "\033[33m${array[3]}\033[0m")
-  fi
-
-  printf "\033[1mLast run\033[0m\n\nTime:      %s\nStatus:    %s\nDuration:  %s sec.\nHost:      %s\nDirectory: %s\nSessionid: %s\nCommand id: %s\nCommand:\n\n" ${array[0]}  ${array[1]}  ${array[2]}  ${array[3]} ${array[4]} ${array[5]} ${array[6]} ${array[7]}
-  echo "${array[8,-1]}"
+    printf "\033[1mLast run\033[0m\n\n"
+    printf "Time:       %s\n" ${array[1]}
+    printf "Status:     %s\n" ${array[2]}
+    printf "Duration:   %ss\n" ${array[3]}
+    printf "Host:       %s\n" ${array[4]}
+    printf "Directory:  %s\n" ${array[5]}
+    printf "Session id: %s\n" ${array[6]}
+    printf "Command id: %s\n" ${array[7]}
+    echo "\n\n${array[8,-1]}"
 }
 
-histdb-get-command(){
-  HISTDB_FILE=$1
-  CMD_ID=$2
+histdb-next-mode() {
+    local current_mode=$1
+    local current_idx=${HISTDB_FZF_MODES[(Ie)$current_mode]}
+    local next_idx=$((($current_idx % $#HISTDB_FZF_MODES) + 1))
+    echo $HISTDB_FZF_MODES[$next_idx]
+}
 
-  local query="
-    select
-      argv as cmd
-    from
-      history
-      left join commands on history.command_id = commands.id
-    where
-      history.id='${CMD_ID}'
-  "
-  printf "%s" "$(sqlite3 -cmd ".timeout 1000" "${HISTDB_FILE}" "$query")"
+histdb-get-header() {
+    case "$1" in
+        'session') echo "Session local history" ;;
+        'local') echo "Directory local history ${fg[blue]}$(pwd)${reset_color}" ;;
+        'global') echo "Global history ${fg[blue]}$(hostname)${reset_color}" ;;
+        'everywhere') echo "Everywhere" ;;
+    esac
+
+    for mode in ${HISTDB_FZF_MODES[*]}; do
+        if [[ "$mode" == "$1" ]]; then
+            echo -n "${fg[blue]}"
+        else
+            echo -n "${bold_color}"
+        fi
+        local key=${HISTDB_FZF_MODE_KEYS[$mode]}
+        echo -n "$key: $mode${reset_color} "
+    done
+    echo -n "\n―――――――――――――――――――――――――"
+}
+
+histdb-get-command() {
+    histdb_file=$1
+    history_id=$2
+
+    local query="
+        select
+          argv as cmd
+        from
+          history
+          left join commands on history.command_id = commands.id
+        where
+          history.id='${history_id}'
+    "
+
+    printf "%s" "$(sqlite3 -cmd ".timeout 1000" "${histdb_file}" "$query")"
+}
+
+histdb-delete-command() {
+    history_id=$1
+    histdb-fzf-log "deleting command with history id ${history_id}"
+
+    _histdb_query "
+        delete from history
+        where history.command_id = (
+          select command_id from history where id = '${history_id}'
+        )
+    "
+    _histdb_query "delete from commands where commands.id not in (select distinct history.command_id from history)"
+    _histdb_query "delete from places where places.id not in (select distinct history.place_id from history)"
 }
 
 histdb-fzf-widget() {
-  local selected num mode exitkey typ cmd_opts
-  ORIG_FZF_DEFAULT_OPTS=$FZF_DEFAULT_OPTS
-  query=${BUFFER}
-  origquery=${BUFFER}
-  histdb-fzf-log "================== START ==================="
-  histdb-fzf-log "original buffers: -:$BUFFER l:$LBUFFER r:$RBUFFER"
-  histdb-fzf-log "original query $query"
-  histdb_fzf_modes=('session' 'loc' 'global' 'everywhere')
+    query=${BUFFER}
+    local origquery=${BUFFER}
 
-  if [[ -n ${HISTDB_FZF_DEFAULT_MODE} ]]; then
-    mode=${HISTDB_FZF_DEFAULT_MODE}
-  elif [[ -z ${HISTDB_SESSION} ]];then
-    mode=2
-  else
-    mode=1
-  fi
-  histdb-fzf-log "Start mode ${histdb_fzf_modes[$mode]} ($mode)"
-  exitkey='ctrl-r'
-  setopt localoptions noglobsubst noposixbuiltins pipefail 2> /dev/null
-  # Here it is getting a bit tricky, fzf does not support dynamic updating so we have to close and reopen fzf when changing the focus (session, dir, global)
-  # so we check the exitkey and decide what to do
-  while [[ "$exitkey" != "" && "$exitkey" != "esc" ]]; do
-    histdb-fzf-log "------------------- TURN -------------------"
-    histdb-fzf-log "Exitkey $exitkey"
-    # the f keys are a shortcut to select a certain mode
-    if [[ $exitkey =~ "f." ]]; then
-      mode=${exitkey[$(($MBEGIN+1)),$MEND]}
-      histdb-fzf-log "mode changed to ${histdb_fzf_modes[$mode]} ($mode)"
+    histdb-fzf-log "================== START ==================="
+    histdb-fzf-log "original buffers: -:$BUFFER l:$LBUFFER r:$RBUFFER"
+    histdb-fzf-log "original query $query"
+
+    local mode=$HISTDB_FZF_DEFAULT_MODE
+
+    histdb-fzf-log "Start mode $mode"
+    local exitkey="any"
+    setopt localoptions noglobsubst noposixbuiltins pipefail 2> /dev/null
+
+    local history_id
+    local selected
+
+    # Here it is getting a bit tricky, fzf does not support dynamic updating so we
+    # have to close and reopen fzf when changing the focus (session, dir, global)
+    # so we check the exitkey and decide what to do.
+    while [[ "$exitkey" != "" && "$exitkey" != "esc" ]]; do
+        histdb-fzf-log "------------------- TURN -------------------"
+        histdb-fzf-log "Exitkey $exitkey"
+
+        local next_mode=${(k)HISTDB_FZF_MODE_KEYS[(Re)$exitkey]}
+        if [[ -n "$next_mode" ]]; then
+            mode=$next_mode
+            histdb-fzf-log "mode changed to $mode"
+        elif [[ "$exitkey" == "ctrl-r" ]]; then
+            mode=$(histdb-next-mode "$mode")
+            histdb-fzf-log "mode changed to $mode"
+        elif [[ "$exitkey" == "ctrl-alt-d" ]]; then
+            histdb-delete-command "$history_id"
+        fi
+
+        # Log the FZF arguments.
+        OPTIONS="$FZF_DEFAULT_OPTS
+            --ansi
+            --header='$(histdb-get-header "$mode")' --delimiter='$SEP'
+            -n1.. --with-nth=2..
+            --tiebreak=index
+            --expect='esc,ctrl-r,ctrl-alt-d,f1,f2,f3,f4'
+            --bind 'ctrl-/:toggle-preview'
+            --print-query
+            --preview='source ${HISTDB_FZF_SOURCE}; histdb-detail ${HISTDB_FILE} {1}'
+            --preview-window=right:50%:hidden,wrap
+            --no-hscroll
+            --query='${query}' +m"
+
+        histdb-fzf-log "$OPTIONS"
+
+        result=( "${(@f)$( histdb-fzf-query ${mode} |
+            FZF_DEFAULT_OPTS="${OPTIONS}" ${HISTDB_FZF_COMMAND})}" )
+
+        # Here we got a result from fzf, containing all the information, now we
+        # must handle it, split it and use the correct elements.
+        histdb-fzf-log "returncode was $?"
+        query=$result[1]
+        exitkey=${result[2]}
+        selected="${${(@s: :)result[3]}#* }"
+        history_id="${${(@s: :)result[3]}[1]}"
+        histdb-fzf-log "Query was      ${query:-<nothing>}"
+        histdb-fzf-log "Exitkey was    ${exitkey:-<NONE>}"
+        histdb-fzf-log "History ID was ${history_id}"
+        histdb-fzf-log "Selected was   ${selected}"
+    done
+
+    if [[ "$exitkey" == "esc" ]]; then
+        BUFFER=$origquery
+    else
+        # We already have the selected command, but newlines are replaced by
+        # spaces in that. Get the actual command from the sqlite database.
+        selected=$(histdb-get-command "${HISTDB_FILE}" "$history_id")
+        histdb-fzf-log "selected = $selected"
+        BUFFER=$selected
     fi
-    # based on the mode, we use the options for histdb options
-    case "$histdb_fzf_modes[$mode]" in
-      'session')
-        cmd_opts="-s"
-        typ="Session local history ${fg[blue]}${HISTDB_SESSION}${reset_color}"
-        switchhints="${fg[blue]}F1: session${reset_color} ${bold_color}F2: directory${reset_color} ${bold_color}F3: global${reset_color} ${bold_color}F4: everywhere${reset_color}"
-        ;;
-      'loc')
-        cmd_opts="-d"
-        typ="Directory local history ${fg[blue]}$(pwd)${reset_color}"
-        switchhints="${bold_color}F1: session${reset_color} ${fg[blue]}F2: directory${reset_color} ${bold_color}F3: global${reset_color} ${bold_color}F4: everywhere${reset_color}"
-        ;;
-      'global')
-        cmd_opts=""
-        typ="global history ${fg[blue]}$(hostname)${reset_color}"
-        switchhints="${bold_color}F1: session${reset_color} ${bold_color}F2: directory${reset_color} ${fg[blue]}F3: global${reset_color} ${bold_color}F4: everywhere${reset_color}"
-        ;;
-      'everywhere')
-        cmd_opts="-t"
-        typ='everywhere'
-        switchhints="${bold_color}F1: session${reset_color} ${bold_color}F2: directory${reset_color} ${bold_color}F3: global${reset_color} ${fg[blue]}F4: everywhere${reset_color}"
-        ;;
-    esac
-    mode=$((($mode % $#histdb_fzf_modes) + 1))
-    histdb-fzf-log "mode changed to ${histdb_fzf_modes[$mode]} ($mode)"
-
-    # log the FZF arguments
-    OPTIONS="$ORIG_FZF_DEFAULT_OPTS
-      --ansi
-      --header='${typ}${NL}${switchhints}${NL}―――――――――――――――――――――――――' --delimiter=' '
-      -n2.. --with-nth=2..
-      --tiebreak=index --expect='esc,ctrl-r,f1,f2,f3,f4'
-      --bind 'ctrl-d:page-down,ctrl-u:page-up'
-      --print-query
-      --preview='source ${FZF_HISTDB_FILE}; histdb-detail ${HISTDB_FILE} {1}' --preview-window=right:50%:wrap
-      --no-hscroll
-      --query='${query}' +m"
-
-    histdb-fzf-log "$OPTIONS"
-
-    result=( "${(@f)$( histdb-fzf-query ${cmd_opts} |
-      FZF_DEFAULT_OPTS="${OPTIONS}" ${HISTDB_FZF_CMD})}" )
-    # here we got a result from fzf, containing all the information, now we must handle it, split it and use the correct elements
-    histdb-fzf-log "returncode was $?"
-    query=$result[1]
-    exitkey=${result[2]}
-    fzf_selected="${(@s: :)result[3]}"
-    fzf_selected="${${(@s: :)result[3]}[1]}"
-    histdb-fzf-log "Query was      ${query:-<nothing>}"
-    histdb-fzf-log "Exitkey was    ${exitkey:-<NONE>}"
-    histdb-fzf-log "fzf_selected = $fzf_selected"
-
-  done
-  if [[ "$exitkey" == "esc" ]]; then
-    BUFFER=$origquery
-  else
-    histdb-fzf-log "histdb-get-command ${HISTDB_FILE} ${fzf_selected}"
-    selected=$(histdb-get-command ${HISTDB_FILE} ${fzf_selected})
-    histdb-fzf-log "selected = $selected"
-    BUFFER=$selected
-  fi
-  CURSOR=$#BUFFER
-  zle redisplay
-  histdb-fzf-log "new buffers: -:$BUFFER l:$LBUFFER r:$RBUFFER"
-  histdb-fzf-log "=================== DONE ==================="
+    CURSOR=$#BUFFER
+    zle redisplay
+    histdb-fzf-log "new buffers: -:$BUFFER l:$LBUFFER r:$RBUFFER"
+    histdb-fzf-log "=================== DONE ==================="
 }
+
 zle     -N   histdb-fzf-widget
 bindkey '^R' histdb-fzf-widget
