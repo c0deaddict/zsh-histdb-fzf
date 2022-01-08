@@ -242,7 +242,7 @@ histdb-fzf-widget() {
             --header='$(histdb-get-header "$mode")' --delimiter='$SEP'
             -n1.. --with-nth=2..
             --tiebreak=index
-            --expect='esc,ctrl-r,ctrl-alt-d,f1,f2,f3,f4'
+            --expect='esc,ctrl-r,ctrl-alt-d,${(j:,:)HISTDB_FZF_MODE_KEYS[*]}'
             --bind 'ctrl-/:toggle-preview'
             --print-query
             --preview='source ${HISTDB_FZF_SOURCE}; histdb-detail ${HISTDB_FILE} {1}'
