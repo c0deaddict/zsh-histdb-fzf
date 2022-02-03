@@ -1,5 +1,6 @@
 HISTDB_FZF_COMMAND=${HISTDB_FZF_COMMAND:-fzf}
 HISTDB_FZF_DEFAULT_MODE=${HISTDB_FZF_DEFAULT_MODE:-global}
+HISTDB_FZF_SCRIPT="${0:a:h}/histdb-fzf.zsh"
 
 # Set to "nohidden" to start with preview enabled.
 HISTDB_FZF_PREVIEW=${HISTDB_FZF_PREVIEW:-hidden}
@@ -23,7 +24,6 @@ histdb-fzf-widget() {
     )
 
     local mode=$HISTDB_FZF_DEFAULT_MODE
-    local script="${0:a:h}/histdb-fzf.zsh"
 
     setopt localoptions noglobsubst noposixbuiltins pipefail 2> /dev/null
 
@@ -34,8 +34,8 @@ histdb-fzf-widget() {
         --with-nth=2..
         --tiebreak=index
         --bind 'ctrl-/:toggle-preview'
-        --bind "'ctrl-alt-d:execute(${script} delete {1})'"
-        "--preview='${script} detail {1}'"
+        --bind "'ctrl-alt-d:execute(${HISTDB_FZF_SCRIPT} delete {1})'"
+        "--preview='${HISTDB_FZF_SCRIPT} detail {1}'"
         "--preview-window=right:50%:${HISTDB_FZF_PREVIEW},wrap"
         --no-hscroll
         "--query='${query}'"
@@ -45,13 +45,13 @@ histdb-fzf-widget() {
 
     for m in ${modes[*]}; do
         local key="${mode_keys[$m]}"
-        local command="${script} search $m"
+        local command="${HISTDB_FZF_SCRIPT} search $m"
         options+=("--bind" "'${key}:change-prompt(${m}> )+reload(${command})'")
     done
 
     local result=( "$(
         export PWD HISTDB_FILE HISTDB_HOST HISTDB_SESSION;
-        ${script} search $mode |
+        ${HISTDB_FZF_SCRIPT} search $mode |
         FZF_DEFAULT_OPTS="$FZF_DEFAULT_OPTS ${options[@]}" ${HISTDB_FZF_COMMAND}
     )" )
 
@@ -61,7 +61,7 @@ histdb-fzf-widget() {
         # The selected command could be extracted from the result, but newlines
         # are replaced by spaces in that. Get the actual command from the sqlite
         # database.
-        BUFFER=$( HISTDB_FILE="${HISTDB_FILE}" $script get "$history_id" )
+        BUFFER=$( HISTDB_FILE="${HISTDB_FILE}" $HISTDB_FZF_SCRIPT get "$history_id" )
     fi
 
     CURSOR=$#BUFFER
